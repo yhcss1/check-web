@@ -1,0 +1,134 @@
+name: 🔍 Daily Website Health Check
+
+on:
+  schedule:
+    # 每天早上10点 JST (UTC+9) = UTC 01:00
+    - cron: "0 1 * * *"
+  workflow_dispatch: # 允许手动触发
+
+jobs:
+  health-check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 🏥 Check all websites
+        id: check
+        run: |
+          #!/bin/bash
+
+          # ===== 配置：在这里添加或修改要监控的 URL =====
+          URLS=(
+            "https://atmealtime.com/"
+            "https://group-ultra.com/"
+            "https://riffo.ai/"
+            "https://intent.app/"
+            "https://intent.app/tools/"
+            "https://intent.app/tools/image-translator"
+            "https://intent.app/zh-CN"
+            "https://intentchat.app/"
+            "https://intent.inc/"
+          )
+
+          # ===== 检查逻辑 =====
+          FAILED=()
+          SLOW=()
+          RESULTS=""
+          ALL_PASS=true
+          TOTAL=${#URLS[@]}
+          PASS_COUNT=0
+          FAIL_COUNT=0
+          SLOW_COUNT=0
+
+          echo "========================================"
+          echo "🔍 Website Health Check"
+          echo "📅 $(TZ='Asia/Tokyo' date '+%Y-%m-%d %H:%M:%S JST')"
+          echo "========================================"
+          echo ""
+
+          for url in "${URLS[@]}"; do
+            # 发请求，记录状态码和响应时间
+            START=$(date +%s%N)
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+              --max-time 15 \
+              --retry 2 \
+              --retry-delay 3 \
+              -L \
+              -A "Mozilla/5.0 HealthCheck/1.0" \
+              "$url" 2>/dev/null) || HTTP_CODE="000"
+            END=$(date +%s%N)
+            
+            # 计算响应时间（毫秒）
+            DURATION=$(( (END - START) / 1000000 ))
+            
+            # 判断结果
+            if [[ "$HTTP_CODE" =~ ^(200|301|302|304)$ ]]; then
+              if [ "$DURATION" -gt 5000 ]; then
+                STATUS="⚠️ SLOW"
+                SLOW+=("$url (${DURATION}ms)")
+                SLOW_COUNT=$((SLOW_COUNT + 1))
+                PASS_COUNT=$((PASS_COUNT + 1))
+              else
+                STATUS="✅ OK"
+                PASS_COUNT=$((PASS_COUNT + 1))
+              fi
+            else
+              STATUS="❌ FAIL"
+              FAILED+=("$url (HTTP $HTTP_CODE)")
+              FAIL_COUNT=$((FAIL_COUNT + 1))
+              ALL_PASS=false
+            fi
+            
+            printf "%-45s %s  HTTP:%s  %dms\n" "$url" "$STATUS" "$HTTP_CODE" "$DURATION"
+            RESULTS="${RESULTS}${url} | ${STATUS} | HTTP ${HTTP_CODE} | ${DURATION}ms\n"
+          done
+
+          echo ""
+          echo "========================================"
+          echo "📊 Summary: ${PASS_COUNT}/${TOTAL} passed, ${FAIL_COUNT} failed, ${SLOW_COUNT} slow"
+          echo "========================================"
+
+          # 输出失败列表
+          if [ ${#FAILED[@]} -gt 0 ]; then
+            echo ""
+            echo "❌ Failed sites:"
+            for f in "${FAILED[@]}"; do
+              echo "   - $f"
+            done
+          fi
+
+          if [ ${#SLOW[@]} -gt 0 ]; then
+            echo ""
+            echo "⚠️ Slow sites (>5s):"
+            for s in "${SLOW[@]}"; do
+              echo "   - $s"
+            done
+          fi
+
+          # 保存结果供后续 step 使用
+          echo "all_pass=$ALL_PASS" >> $GITHUB_OUTPUT
+          echo "fail_count=$FAIL_COUNT" >> $GITHUB_OUTPUT
+          echo "total=$TOTAL" >> $GITHUB_OUTPUT
+          echo "pass_count=$PASS_COUNT" >> $GITHUB_OUTPUT
+
+          # 如果有失败则 exit 1，触发 GitHub 的失败通知邮件
+          if [ "$ALL_PASS" = false ]; then
+            echo ""
+            echo "🚨 Some sites are DOWN! Check above for details."
+            exit 1
+          fi
+
+          echo ""
+          echo "🎉 All sites are healthy!"
+
+      - name: 📝 Create summary
+        if: always()
+        run: |
+          echo "## 🔍 Website Health Check Report" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Time:** $(TZ='Asia/Tokyo' date '+%Y-%m-%d %H:%M:%S JST')" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ steps.check.outputs.all_pass }}" = "true" ]; then
+            echo "### ✅ All ${{ steps.check.outputs.total }} sites are healthy!" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "### ❌ ${{ steps.check.outputs.fail_count }} / ${{ steps.check.outputs.total }} sites have issues!" >> $GITHUB_STEP_SUMMARY
+          fi
