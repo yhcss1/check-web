@@ -1,4 +1,4 @@
-name: 🔍 Daily Website Health Check
+name: 🔍 Daily Website Health Check + Screenshots
 
 on:
   schedule:
@@ -11,124 +11,176 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: 🏥 Check all websites
-        id: check
+      - name: 📦 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: 📦 Install Puppeteer
+        run: npm install puppeteer
+
+      - name: 🏥 Check websites + take screenshots
         run: |
-          #!/bin/bash
+          node << 'SCRIPT'
+          const puppeteer = require('puppeteer');
+          const fs = require('fs');
+          const path = require('path');
 
-          # ===== 配置：在这里添加或修改要监控的 URL =====
-          URLS=(
-            "https://atmealtime.com/"
-            "https://group-ultra.com/"
-            "https://riffo.ai/"
-            "https://intent.app/"
-            "https://intent.app/tools/"
-            "https://intent.app/tools/image-translator"
-            "https://intent.app/zh-CN"
-            "https://intentchat.app/"
-            "https://intent.inc/"
-          )
+          // ===== 配置：要监控的 URL =====
+          const sites = [
+            { url: 'https://atmealtime.com/', name: 'atmealtime' },
+            { url: 'https://group-ultra.com/', name: 'group-ultra' },
+            { url: 'https://riffo.ai/', name: 'riffo' },
+            { url: 'https://intent.app/', name: 'intent-home' },
+            { url: 'https://intent.app/tools/', name: 'intent-tools' },
+            { url: 'https://intent.app/tools/image-translator', name: 'intent-image-translator' },
+            { url: 'https://intent.app/zh-CN', name: 'intent-zh-CN' },
+            { url: 'https://intent.app/blog', name: 'intent-blog' },
+            { url: 'https://intentchat.app/', name: 'intentchat' },
+            { url: 'https://intent.inc/', name: 'intent-inc' },
+          ];
 
-          # ===== 检查逻辑 =====
-          FAILED=()
-          SLOW=()
-          RESULTS=""
-          ALL_PASS=true
-          TOTAL=${#URLS[@]}
-          PASS_COUNT=0
-          FAIL_COUNT=0
-          SLOW_COUNT=0
+          const SCREENSHOT_DIR = './screenshots';
+          const TIMEOUT = 30000;
 
-          echo "========================================"
-          echo "🔍 Website Health Check"
-          echo "📅 $(TZ='Asia/Tokyo' date '+%Y-%m-%d %H:%M:%S JST')"
-          echo "========================================"
-          echo ""
+          (async () => {
+            fs.mkdirSync(SCREENSHOT_DIR, { recursive: true });
 
-          for url in "${URLS[@]}"; do
-            # 发请求，记录状态码和响应时间
-            START=$(date +%s%N)
-            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
-              --max-time 15 \
-              --retry 2 \
-              --retry-delay 3 \
-              -L \
-              -A "Mozilla/5.0 HealthCheck/1.0" \
-              "$url" 2>/dev/null) || HTTP_CODE="000"
-            END=$(date +%s%N)
-            
-            # 计算响应时间（毫秒）
-            DURATION=$(( (END - START) / 1000000 ))
-            
-            # 判断结果
-            if [[ "$HTTP_CODE" =~ ^(200|301|302|304)$ ]]; then
-              if [ "$DURATION" -gt 5000 ]; then
-                STATUS="⚠️ SLOW"
-                SLOW+=("$url (${DURATION}ms)")
-                SLOW_COUNT=$((SLOW_COUNT + 1))
-                PASS_COUNT=$((PASS_COUNT + 1))
-              else
-                STATUS="✅ OK"
-                PASS_COUNT=$((PASS_COUNT + 1))
-              fi
-            else
-              STATUS="❌ FAIL"
-              FAILED+=("$url (HTTP $HTTP_CODE)")
-              FAIL_COUNT=$((FAIL_COUNT + 1))
-              ALL_PASS=false
-            fi
-            
-            printf "%-45s %s  HTTP:%s  %dms\n" "$url" "$STATUS" "$HTTP_CODE" "$DURATION"
-            RESULTS="${RESULTS}${url} | ${STATUS} | HTTP ${HTTP_CODE} | ${DURATION}ms\n"
-          done
+            const browser = await puppeteer.launch({
+              headless: 'new',
+              args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+            });
 
-          echo ""
-          echo "========================================"
-          echo "📊 Summary: ${PASS_COUNT}/${TOTAL} passed, ${FAIL_COUNT} failed, ${SLOW_COUNT} slow"
-          echo "========================================"
+            const results = [];
+            let failCount = 0;
 
-          # 输出失败列表
-          if [ ${#FAILED[@]} -gt 0 ]; then
-            echo ""
-            echo "❌ Failed sites:"
-            for f in "${FAILED[@]}"; do
-              echo "   - $f"
-            done
-          fi
+            for (const site of sites) {
+              const page = await browser.newPage();
+              await page.setViewport({ width: 1440, height: 900 });
+              await page.setUserAgent(
+                'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+              );
 
-          if [ ${#SLOW[@]} -gt 0 ]; then
-            echo ""
-            echo "⚠️ Slow sites (>5s):"
-            for s in "${SLOW[@]}"; do
-              echo "   - $s"
-            done
-          fi
+              const startTime = Date.now();
+              let status = '✅ OK';
+              let httpCode = 0;
+              let error = '';
 
-          # 保存结果供后续 step 使用
-          echo "all_pass=$ALL_PASS" >> $GITHUB_OUTPUT
-          echo "fail_count=$FAIL_COUNT" >> $GITHUB_OUTPUT
-          echo "total=$TOTAL" >> $GITHUB_OUTPUT
-          echo "pass_count=$PASS_COUNT" >> $GITHUB_OUTPUT
+              try {
+                const response = await page.goto(site.url, {
+                  waitUntil: 'networkidle2',
+                  timeout: TIMEOUT,
+                });
 
-          # 如果有失败则 exit 1，触发 GitHub 的失败通知邮件
-          if [ "$ALL_PASS" = false ]; then
-            echo ""
-            echo "🚨 Some sites are DOWN! Check above for details."
-            exit 1
-          fi
+                httpCode = response ? response.status() : 0;
+                await new Promise(r => setTimeout(r, 2000));
 
-          echo ""
-          echo "🎉 All sites are healthy!"
+                await page.screenshot({
+                  path: path.join(SCREENSHOT_DIR, `${site.name}.png`),
+                  fullPage: false,
+                });
 
-      - name: 📝 Create summary
+                if (httpCode >= 400) {
+                  status = '❌ FAIL';
+                  failCount++;
+                }
+              } catch (err) {
+                status = '❌ FAIL';
+                error = err.message.substring(0, 100);
+                failCount++;
+                try {
+                  await page.screenshot({
+                    path: path.join(SCREENSHOT_DIR, `${site.name}-ERROR.png`),
+                    fullPage: false,
+                  });
+                } catch {}
+              }
+
+              const duration = Date.now() - startTime;
+              if (duration > 10000 && status === '✅ OK') {
+                status = '⚠️ SLOW';
+              }
+
+              results.push({ ...site, status, httpCode, duration, error });
+              console.log(`${status}  ${site.url}  HTTP:${httpCode}  ${duration}ms  ${error}`);
+              await page.close();
+            }
+
+            await browser.close();
+
+            // ===== 生成 HTML 报告 =====
+            const now = new Date().toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' });
+
+            let html = `<!DOCTYPE html>
+          <html lang="zh">
+          <head>
+          <meta charset="UTF-8">
+          <title>网站健康检查 - ${now}</title>
+          <style>
+            * { margin: 0; padding: 0; box-sizing: border-box; }
+            body { font-family: -apple-system, sans-serif; background: #f5f5f5; padding: 30px; color: #333; }
+            h1 { text-align: center; margin-bottom: 8px; }
+            .time { text-align: center; color: #888; margin-bottom: 24px; }
+            .summary { text-align: center; font-size: 1.2rem; margin-bottom: 30px; padding: 16px;
+              background: ${failCount > 0 ? '#fff0f0' : '#f0fff0'}; border-radius: 12px; }
+            .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(420px, 1fr)); gap: 20px; }
+            .card { background: white; border-radius: 12px; overflow: hidden; box-shadow: 0 2px 12px rgba(0,0,0,0.08); }
+            .card-header { padding: 14px 18px; display: flex; justify-content: space-between;
+              align-items: center; border-bottom: 1px solid #eee; }
+            .url { font-size: 0.85rem; color: #666; word-break: break-all; }
+            .meta { font-size: 0.75rem; color: #aaa; margin-top: 4px; }
+            .badge { padding: 3px 10px; border-radius: 20px; font-size: 0.75rem; font-weight: 600; }
+            .badge-ok { background: #e8f5e9; color: #2e7d32; }
+            .badge-fail { background: #ffebee; color: #c62828; }
+            .badge-slow { background: #fff8e1; color: #f57f17; }
+            .card img { width: 100%; display: block; }
+          </style>
+          </head>
+          <body>
+          <h1>🔍 网站健康检查报告</h1>
+          <p class="time">📅 ${now} (JST)</p>
+          <div class="summary">${failCount > 0
+            ? '❌ ' + failCount + ' / ' + results.length + ' 个网站异常！'
+            : '✅ 全部 ' + results.length + ' 个网站正常'}</div>
+          <div class="grid">`;
+
+            for (const r of results) {
+              const bc = r.status.includes('OK') ? 'badge-ok' : r.status.includes('SLOW') ? 'badge-slow' : 'badge-fail';
+              const img = r.status.includes('FAIL') && r.error ? `${r.name}-ERROR.png` : `${r.name}.png`;
+              const exists = fs.existsSync(path.join(SCREENSHOT_DIR, img));
+              html += `
+            <div class="card">
+              <div class="card-header">
+                <div><div class="url">${r.url}</div>
+                <div class="meta">HTTP ${r.httpCode} · ${r.duration}ms${r.error ? ' · ' + r.error : ''}</div></div>
+                <span class="badge ${bc}">${r.status}</span>
+              </div>
+              ${exists ? `<img src="${img}" />` : ''}
+            </div>`;
+            }
+
+            html += '</div></body></html>';
+            fs.writeFileSync(path.join(SCREENSHOT_DIR, 'report.html'), html);
+
+            // ===== GitHub Summary =====
+            const sf = process.env.GITHUB_STEP_SUMMARY;
+            if (sf) {
+              let md = `## 🔍 Health Check Report\n**${now} JST**\n\n`;
+              md += '| Status | Site | HTTP | Time |\n|---|---|---|---|\n';
+              for (const r of results) md += `| ${r.status} | ${r.url} | ${r.httpCode} | ${r.duration}ms |\n`;
+              md += '\n📸 下载 Artifact 查看截图和完整报告\n';
+              fs.appendFileSync(sf, md);
+            }
+
+            if (failCount > 0) { console.error(`\n🚨 ${failCount} sites failed!`); process.exit(1); }
+            console.log('\n🎉 All healthy!');
+          })();
+          SCRIPT
+
+      - name: 📸 Upload screenshots & report
         if: always()
-        run: |
-          echo "## 🔍 Website Health Check Report" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Time:** $(TZ='Asia/Tokyo' date '+%Y-%m-%d %H:%M:%S JST')" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          if [ "${{ steps.check.outputs.all_pass }}" = "true" ]; then
-            echo "### ✅ All ${{ steps.check.outputs.total }} sites are healthy!" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "### ❌ ${{ steps.check.outputs.fail_count }} / ${{ steps.check.outputs.total }} sites have issues!" >> $GITHUB_STEP_SUMMARY
-          fi
+        uses: actions/upload-artifact@v4
+        with:
+          name: health-check-${{ github.run_number }}
+          path: screenshots/
+          retention-days: 30
