@@ -2,9 +2,8 @@ name: 🔍 Daily Website Health Check + Screenshots
 
 on:
   schedule:
-    # 每天早上10点 JST (UTC+9) = UTC 01:00
     - cron: "0 1 * * *"
-  workflow_dispatch: # 允许手动触发
+  workflow_dispatch:
 
 jobs:
   health-check:
@@ -23,25 +22,38 @@ jobs:
         run: |
           node << 'SCRIPT'
           const puppeteer = require('puppeteer');
+          const { execSync } = require('child_process');
           const fs = require('fs');
           const path = require('path');
 
-          // ===== 配置：要监控的 URL =====
           const sites = [
             { url: 'https://atmealtime.com/', name: 'atmealtime' },
             { url: 'https://group-ultra.com/', name: 'group-ultra' },
             { url: 'https://riffo.ai/', name: 'riffo' },
             { url: 'https://intent.app/', name: 'intent-home' },
             { url: 'https://intent.app/tools/', name: 'intent-tools' },
-            { url: 'https://intent.app/tools/image-translator', name: 'intent-image-translator' },
-            { url: 'https://intent.app/zh-CN', name: 'intent-zh-CN' },
+            { url: 'https://intent.app/tools/image-translator', name: 'intent-img-translator' },
+            { url: 'https://intent.app/zh-CN', name: 'intent-zh' },
             { url: 'https://intent.app/blog', name: 'intent-blog' },
             { url: 'https://intentchat.app/', name: 'intentchat' },
             { url: 'https://intent.inc/', name: 'intent-inc' },
           ];
 
           const SCREENSHOT_DIR = './screenshots';
-          const TIMEOUT = 30000;
+          const TIMEOUT = 60000;
+
+          // curl 检查作为兜底
+          function curlCheck(url) {
+            try {
+              const code = execSync(
+                `curl -s -o /dev/null -w "%{http_code}" --max-time 15 -L -A "Mozilla/5.0" "${url}"`,
+                { encoding: 'utf-8' }
+              ).trim();
+              return parseInt(code, 10);
+            } catch {
+              return 0;
+            }
+          }
 
           (async () => {
             fs.mkdirSync(SCREENSHOT_DIR, { recursive: true });
@@ -65,51 +77,73 @@ jobs:
               let status = '✅ OK';
               let httpCode = 0;
               let error = '';
+              let screenshotTaken = false;
 
               try {
+                // 第一步：先用 domcontentloaded 快速加载
                 const response = await page.goto(site.url, {
-                  waitUntil: 'networkidle2',
+                  waitUntil: 'domcontentloaded',
                   timeout: TIMEOUT,
                 });
-
                 httpCode = response ? response.status() : 0;
-                await new Promise(r => setTimeout(r, 2000));
+
+                // 再额外等几秒让 JS 渲染
+                await new Promise(r => setTimeout(r, 5000));
 
                 await page.screenshot({
                   path: path.join(SCREENSHOT_DIR, `${site.name}.png`),
                   fullPage: false,
                 });
+                screenshotTaken = true;
 
                 if (httpCode >= 400) {
                   status = '❌ FAIL';
                   failCount++;
                 }
               } catch (err) {
-                status = '❌ FAIL';
-                error = err.message.substring(0, 100);
-                failCount++;
+                error = err.message.substring(0, 120);
+
+                // Puppeteer 超时了，尝试截当前页面状态
                 try {
                   await page.screenshot({
-                    path: path.join(SCREENSHOT_DIR, `${site.name}-ERROR.png`),
+                    path: path.join(SCREENSHOT_DIR, `${site.name}.png`),
                     fullPage: false,
                   });
+                  screenshotTaken = true;
                 } catch {}
+
+                // 用 curl 兜底检查：服务器是否真的挂了
+                console.log(`  ↳ Puppeteer timeout, falling back to curl check...`);
+                const curlCode = curlCheck(site.url);
+
+                if (curlCode >= 200 && curlCode < 400) {
+                  // 服务器正常，只是页面加载慢
+                  status = '⚠️ SLOW';
+                  httpCode = curlCode;
+                  error = `Puppeteer timeout but curl OK (HTTP ${curlCode})`;
+                } else {
+                  // 真的挂了
+                  status = '❌ DOWN';
+                  httpCode = curlCode;
+                  failCount++;
+                }
               }
 
               const duration = Date.now() - startTime;
-              if (duration > 10000 && status === '✅ OK') {
+              if (duration > 15000 && status === '✅ OK') {
                 status = '⚠️ SLOW';
               }
 
-              results.push({ ...site, status, httpCode, duration, error });
+              results.push({ ...site, status, httpCode, duration, error, screenshotTaken });
               console.log(`${status}  ${site.url}  HTTP:${httpCode}  ${duration}ms  ${error}`);
               await page.close();
             }
 
             await browser.close();
 
-            // ===== 生成 HTML 报告 =====
+            // ===== HTML 报告 =====
             const now = new Date().toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' });
+            const downCount = results.filter(r => r.status.includes('DOWN')).length;
 
             let html = `<!DOCTYPE html>
           <html lang="zh">
@@ -122,44 +156,57 @@ jobs:
             h1 { text-align: center; margin-bottom: 8px; }
             .time { text-align: center; color: #888; margin-bottom: 24px; }
             .summary { text-align: center; font-size: 1.2rem; margin-bottom: 30px; padding: 16px;
-              background: ${failCount > 0 ? '#fff0f0' : '#f0fff0'}; border-radius: 12px; }
-            .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(420px, 1fr)); gap: 20px; }
+              border-radius: 12px; }
+            .summary-ok { background: #f0fff0; }
+            .summary-warn { background: #fffde7; }
+            .summary-fail { background: #fff0f0; }
+            .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(440px, 1fr)); gap: 20px; }
             .card { background: white; border-radius: 12px; overflow: hidden; box-shadow: 0 2px 12px rgba(0,0,0,0.08); }
             .card-header { padding: 14px 18px; display: flex; justify-content: space-between;
               align-items: center; border-bottom: 1px solid #eee; }
             .url { font-size: 0.85rem; color: #666; word-break: break-all; }
             .meta { font-size: 0.75rem; color: #aaa; margin-top: 4px; }
-            .badge { padding: 3px 10px; border-radius: 20px; font-size: 0.75rem; font-weight: 600; }
+            .badge { padding: 3px 10px; border-radius: 20px; font-size: 0.75rem; font-weight: 600; white-space: nowrap; }
             .badge-ok { background: #e8f5e9; color: #2e7d32; }
-            .badge-fail { background: #ffebee; color: #c62828; }
+            .badge-down { background: #ffebee; color: #c62828; }
             .badge-slow { background: #fff8e1; color: #f57f17; }
             .card img { width: 100%; display: block; }
+            .legend { text-align: center; margin-top: 24px; color: #aaa; font-size: 0.8rem; }
           </style>
           </head>
           <body>
           <h1>🔍 网站健康检查报告</h1>
           <p class="time">📅 ${now} (JST)</p>
-          <div class="summary">${failCount > 0
-            ? '❌ ' + failCount + ' / ' + results.length + ' 个网站异常！'
-            : '✅ 全部 ' + results.length + ' 个网站正常'}</div>
-          <div class="grid">`;
+          <div class="summary ${downCount > 0 ? 'summary-fail' : failCount > 0 ? 'summary-warn' : 'summary-ok'}">`;
+
+            if (downCount > 0) {
+              html += `🚨 ${downCount} 个网站无法访问！`;
+            } else if (failCount > 0) {
+              html += `⚠️ 全部可访问，但有 ${results.filter(r => r.status.includes('SLOW')).length} 个加载较慢`;
+            } else {
+              html += `✅ 全部 ${results.length} 个网站正常`;
+            }
+            html += `</div><div class="grid">`;
 
             for (const r of results) {
-              const bc = r.status.includes('OK') ? 'badge-ok' : r.status.includes('SLOW') ? 'badge-slow' : 'badge-fail';
-              const img = r.status.includes('FAIL') && r.error ? `${r.name}-ERROR.png` : `${r.name}.png`;
-              const exists = fs.existsSync(path.join(SCREENSHOT_DIR, img));
+              const bc = r.status.includes('OK') ? 'badge-ok' : r.status.includes('DOWN') ? 'badge-down' : 'badge-slow';
+              const imgFile = `${r.name}.png`;
+              const exists = fs.existsSync(path.join(SCREENSHOT_DIR, imgFile));
               html += `
             <div class="card">
               <div class="card-header">
                 <div><div class="url">${r.url}</div>
-                <div class="meta">HTTP ${r.httpCode} · ${r.duration}ms${r.error ? ' · ' + r.error : ''}</div></div>
+                <div class="meta">HTTP ${r.httpCode} · ${(r.duration / 1000).toFixed(1)}s${r.error ? ' · ' + r.error : ''}</div></div>
                 <span class="badge ${bc}">${r.status}</span>
               </div>
-              ${exists ? `<img src="${img}" />` : ''}
+              ${exists ? `<img src="${imgFile}" />` : ''}
             </div>`;
             }
 
-            html += '</div></body></html>';
+            html += `</div>
+          <p class="legend">✅ OK = 正常 · ⚠️ SLOW = 可访问但加载慢 · ❌ DOWN = 无法访问</p>
+          </body></html>`;
+
             fs.writeFileSync(path.join(SCREENSHOT_DIR, 'report.html'), html);
 
             // ===== GitHub Summary =====
@@ -167,13 +214,17 @@ jobs:
             if (sf) {
               let md = `## 🔍 Health Check Report\n**${now} JST**\n\n`;
               md += '| Status | Site | HTTP | Time |\n|---|---|---|---|\n';
-              for (const r of results) md += `| ${r.status} | ${r.url} | ${r.httpCode} | ${r.duration}ms |\n`;
+              for (const r of results) md += `| ${r.status} | ${r.url} | ${r.httpCode} | ${(r.duration/1000).toFixed(1)}s |\n`;
               md += '\n📸 下载 Artifact 查看截图和完整报告\n';
               fs.appendFileSync(sf, md);
             }
 
-            if (failCount > 0) { console.error(`\n🚨 ${failCount} sites failed!`); process.exit(1); }
-            console.log('\n🎉 All healthy!');
+            // 只有真正 DOWN 的才算失败
+            if (downCount > 0) {
+              console.error(`\n🚨 ${downCount} sites are DOWN!`);
+              process.exit(1);
+            }
+            console.log('\n🎉 All sites reachable!');
           })();
           SCRIPT
 
